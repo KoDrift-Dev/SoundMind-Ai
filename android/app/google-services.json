@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1020303887958",
+    "project_id": "soundmind-6b5c8",
+    "storage_bucket": "soundmind-6b5c8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1020303887958:android:3a8252e58a3cb2669e35f7",
+        "android_client_info": {
+          "package_name": "com.example.soundmindai"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpDmte8e3aiTDI237T6wc8rgJemLzSX7U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
