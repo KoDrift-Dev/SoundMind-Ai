@@ -1,17 +1,25 @@
-# soundmindai
+# SoundMind AI — Intelligent Audio Classifier & Music Player
 
-A new Flutter project.
+**SoundMind AI** (Flutter) — intelligent audio classification plus a safe local music player, designed as an acoustic wellness & ambient sound therapy companion for cognitive relaxation.
 
-## Getting Started
+## Features
 
-This project is a starting point for a Flutter application.
+- On-device intelligent audio classification
+- Safe local music player (no cloud upload)
+- Ambient sound therapy sessions
+- Cinematic Flutter UI
 
-A few resources to get you started if this is your first Flutter project:
+## Run it
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+flutter pub get
+flutter run
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Tech
+
+`Flutter` `Dart` `WebAudio DSP`
+
+---
+
+*Built by [KoDrift Dev](https://github.com/KoDrift-Dev) — Your idea. Our technology.*
