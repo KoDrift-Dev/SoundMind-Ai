@@ -3,11 +3,16 @@ import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import '../online/models/online_search_result.dart';
 import '../utils/duration_formatter.dart';
+import 'innertube_search.dart';
 
 class YoutubeService {
   static final YoutubeService instance = YoutubeService();
 
   final YoutubeExplode _yt = YoutubeExplode();
+
+  /// Innertube search (primary). The library's HTML search is kept as a
+  /// fallback when Innertube fails — see innertube_search.dart.
+  final InnertubeSearchClient _innertube = InnertubeSearchClient();
 
   VideoSearchList? _browseSearchList;
 
@@ -116,6 +121,12 @@ class YoutubeService {
   VideoSearchList? _lastSearchList;
   String? _lastSearchQuery;
 
+  /// Innertube continuation state. When the last search went through
+  /// Innertube, pagination continues there; otherwise the library's
+  /// VideoSearchList is used.
+  String? _lastSearchInnertubeToken;
+  bool _lastSearchUsedInnertube = false;
+
   List<OnlineSearchResult> _mapVideos(
     Iterable<Video> videos, {
     String? query,
@@ -183,6 +194,30 @@ class YoutubeService {
     String? targetGenre,
     bool isManualSearch = false,
   }) async {
+    // 1. Primary: Innertube JSON search — immune to YouTube's HTML page
+    //    changes (the reason search broke after YouTube's update).
+    try {
+      final page = await _innertube
+          .search(query)
+          .timeout(const Duration(seconds: 15));
+      if (isManualSearch) {
+        _lastSearchInnertubeToken = page.continuationToken;
+        _lastSearchUsedInnertube = true;
+        _lastSearchList = null;
+        _lastSearchQuery = query;
+      }
+      return _mapVideos(
+        page.videos,
+        query: query,
+        targetGenre: targetGenre,
+        isManualSearch: isManualSearch,
+      );
+    } catch (e) {
+      debugPrint(
+          'YoutubeService: Innertube search failed ($e), falling back to HTML search');
+    }
+
+    // 2. Fallback: library HTML search (previous behaviour).
     try {
       final videos = await _yt.search
           .search(query)
@@ -190,6 +225,8 @@ class YoutubeService {
       if (isManualSearch) {
         _lastSearchList = videos;
         _lastSearchQuery = query;
+        _lastSearchUsedInnertube = false;
+        _lastSearchInnertubeToken = null;
       }
       return _mapVideos(
         videos,
@@ -211,6 +248,19 @@ class YoutubeService {
   /// Loads more search results for manual search ("unlimited data").
   Future<List<OnlineSearchResult>> loadMoreSearchVideos() async {
     try {
+      if (_lastSearchUsedInnertube) {
+        final token = _lastSearchInnertubeToken;
+        if (token == null || token.isEmpty) return [];
+        final page = await _innertube
+            .nextPage(token)
+            .timeout(const Duration(seconds: 15));
+        _lastSearchInnertubeToken = page.continuationToken;
+        return _mapVideos(
+          page.videos,
+          query: _lastSearchQuery,
+          isManualSearch: true,
+        );
+      }
       if (_lastSearchList == null) return [];
       final nextPage = await _lastSearchList!
           .nextPage()
@@ -296,17 +346,38 @@ class YoutubeService {
 
   String? _lastBrowseQuery;
   String? _lastBrowseGenre;
+  String? _browseInnertubeToken;
+  bool _browseUsedInnertube = false;
 
   Future<List<OnlineSearchResult>> searchBrowse(
     String query, {
     String? targetGenre,
   }) async {
+    // 1. Primary: Innertube JSON search.
+    try {
+      _lastBrowseQuery = query;
+      _lastBrowseGenre = targetGenre;
+      final page = await _innertube
+          .search(query)
+          .timeout(const Duration(seconds: 15));
+      _browseInnertubeToken = page.continuationToken;
+      _browseUsedInnertube = true;
+      _browseSearchList = null;
+      return _mapVideos(page.videos, query: query, targetGenre: targetGenre);
+    } catch (e) {
+      debugPrint(
+          'YoutubeService: Innertube browse failed ($e), falling back to HTML search');
+    }
+
+    // 2. Fallback: library HTML search (previous behaviour).
     try {
       _lastBrowseQuery = query;
       _lastBrowseGenre = targetGenre;
       _browseSearchList = await _yt.search
           .search(query)
           .timeout(const Duration(seconds: 15));
+      _browseUsedInnertube = false;
+      _browseInnertubeToken = null;
       return _mapVideos(_browseSearchList!, query: query, targetGenre: targetGenre);
     } on TransientFailureException catch (e, stack) {
       FirebaseCrashlytics.instance.recordError(e, stack, fatal: false);
@@ -321,6 +392,16 @@ class YoutubeService {
 
   Future<List<OnlineSearchResult>> loadMoreBrowse() async {
     try {
+      if (_browseUsedInnertube) {
+        final token = _browseInnertubeToken;
+        if (token == null || token.isEmpty) return [];
+        final page = await _innertube
+            .nextPage(token)
+            .timeout(const Duration(seconds: 15));
+        _browseInnertubeToken = page.continuationToken;
+        return _mapVideos(page.videos,
+            query: _lastBrowseQuery, targetGenre: _lastBrowseGenre);
+      }
       if (_browseSearchList == null) return [];
       final nextPage = await _browseSearchList!
           .nextPage()
@@ -443,8 +524,12 @@ class YoutubeService {
     _browseSearchList = null;
     _lastBrowseQuery = null;
     _lastBrowseGenre = null;
+    _browseInnertubeToken = null;
+    _browseUsedInnertube = false;
     _lastSearchList = null;
     _lastSearchQuery = null;
+    _lastSearchInnertubeToken = null;
+    _lastSearchUsedInnertube = false;
     _streamCache.clear();
     _yt.close();
   }

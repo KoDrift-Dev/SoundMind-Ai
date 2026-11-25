@@ -266,6 +266,35 @@ Production Release
 
 ---
 
+# YOUTUBE SEARCH (updated 25 Nov 2026)
+
+Search runs through `lib/services/innertube_search.dart` — the official
+Innertube `youtubei/v1/search` JSON API (the same API YouTube's own web
+client uses), NOT through HTML scraping.
+
+Why: `youtube_explode_dart`'s search scrapes the `/results` HTML page and
+parses `ytInitialData` out of it. YouTube keeps changing that page (new
+layouts, consent / bot walls for stale user-agents, region-dependent
+markup), so HTML scraping is the first thing to break after a YouTube
+update. The old HTML path is kept as a fallback inside
+`YoutubeService.searchVideos` / `searchBrowse` — Innertube first, HTML
+search only if Innertube throws.
+
+Rules for this file:
+
+- One bad `videoRenderer` must never fail a whole search — parse
+  defensively, skip malformed items.
+- Continuation items arrive wrapped in `itemSectionRenderer` (same as the
+  first page) — unwrap before parsing videos.
+- `ChannelId()` throws on an invalid id — skip the item, never fake an id.
+- If YouTube rejects the WEB client, bump `_clientVersion` in
+  `innertube_search.dart` first.
+- Verified live 25 Nov 2026: 12 real queries (desi + English + Urdu) all
+  returned 13–20 videos; pagination to page 3 works; gibberish query does
+  not crash (YouTube returns fallback results).
+
+---
+
 # IMPORTANT
 
 If a requested feature cannot be implemented because the backend does not exist,
