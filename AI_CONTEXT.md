@@ -293,6 +293,30 @@ Rules for this file:
   returned 13–20 videos; pagination to page 3 works; gibberish query does
   not crash (YouTube returns fallback results).
 
+# HOME FEED FRESHNESS (updated 25 Nov 2026)
+
+YouTube returns the same top ~20 videos for the same query, so a plain
+re-search on refresh only re-shuffles the same songs. The home feed must
+therefore NEVER just re-run the same query and show page 1 again.
+
+- `YoutubeService.searchVideosPage(query, page: 1..3)` returns that result
+  page for the query (Innertube continuations first, HTML nextPage as
+  fallback). It never touches the manual-search pagination state, so the
+  Search screen's own "load more" keeps working, and it is safe to call
+  in parallel for different queries.
+- `HomeScreen` rotates pages on every refresh (`_rotateFeedPage` picks a
+  page 1..3 different from the last one, per pool: Featured / Popular /
+  Your Music / Mixes / Singles), rotates trending query variants, and
+  shuffles the Your Music genre order before picking.
+- `_dropPreviouslyShown` filters out videos the previous refresh showed
+  (YouTube re-ranks results between searches, so a few videos repeat
+  across pages) — this is what makes every refresh visibly new.
+- `_loadMoreSingles` uses real pagination (`searchVideosPage` with the
+  next page number). NEVER append "page N" to the query text — YouTube
+  ignores it and returns the same songs again.
+- `_loadTopTracks` is history-based (most-played) and is intentionally
+  stable — do not rotate it.
+
 ---
 
 # IMPORTANT

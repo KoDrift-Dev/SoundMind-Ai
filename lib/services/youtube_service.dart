@@ -278,6 +278,80 @@ class YoutubeService {
     }
   }
 
+  /// Searches YouTube and returns the requested result [page] for [query].
+  ///
+  /// Page 1 is the first ~20 results. Pages 2+ follow Innertube
+  /// continuation tokens (or the library's nextPage in the HTML fallback),
+  /// so the SAME query returns genuinely different videos on each page.
+  /// This is what makes the home feed show new songs on every refresh
+  /// instead of re-shuffling the same top results.
+  ///
+  /// Never touches the manual-search pagination state
+  /// ([_lastSearchInnertubeToken]/[_lastSearchList]), so the Search
+  /// screen's own "load more" keeps working. Safe to call in parallel
+  /// for different queries.
+  Future<List<OnlineSearchResult>> searchVideosPage(
+    String query, {
+    int page = 1,
+    String? targetGenre,
+  }) async {
+    if (page <= 1) return searchVideos(query, targetGenre: targetGenre);
+
+    // 1. Primary: Innertube JSON search + continuations.
+    try {
+      var current = await _innertube
+          .search(query)
+          .timeout(const Duration(seconds: 15));
+      var mapped = _mapVideos(
+        current.videos,
+        query: query,
+        targetGenre: targetGenre,
+      );
+      var step = 1;
+      while (step < page) {
+        final token = current.continuationToken;
+        if (token == null || token.isEmpty) break;
+        current = await _innertube
+            .nextPage(token)
+            .timeout(const Duration(seconds: 15));
+        mapped = _mapVideos(
+          current.videos,
+          query: query,
+          targetGenre: targetGenre,
+        );
+        step++;
+      }
+      if (mapped.isNotEmpty) return mapped;
+      // Continuation came back empty: fall back to page 1 rather than
+      // showing an empty section.
+      return await searchVideos(query, targetGenre: targetGenre);
+    } catch (e) {
+      debugPrint(
+          'YoutubeService: Innertube paged search failed ($e), trying HTML search');
+    }
+
+    // 2. Fallback: library HTML search + nextPage.
+    try {
+      var list =
+          await _yt.search.search(query).timeout(const Duration(seconds: 15));
+      var mapped = _mapVideos(list, query: query, targetGenre: targetGenre);
+      var step = 1;
+      while (step < page) {
+        final next = await list.nextPage().timeout(const Duration(seconds: 15));
+        if (next == null) break;
+        list = next;
+        mapped = _mapVideos(list, query: query, targetGenre: targetGenre);
+        step++;
+      }
+      if (mapped.isNotEmpty) return mapped;
+      return await searchVideos(query, targetGenre: targetGenre);
+    } catch (e, stack) {
+      FirebaseCrashlytics.instance.recordError(e, stack, fatal: false);
+      debugPrint('YoutubeService paged search error (${e.runtimeType}): $e');
+      return [];
+    }
+  }
+
   /// Fetches related or similar auto-next tracks for a given online song.
   Future<List<OnlineSearchResult>> getRelatedOrAutoNextTracks(
     String videoId,

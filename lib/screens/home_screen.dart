@@ -648,6 +648,60 @@ class _HomeScreenState extends State<HomeScreen>
   int _singlesPage = 0;
   bool _isShuffling = false;
 
+  // ── Feed freshness rotation ──
+  // YouTube returns the same top ~20 videos for the same query, so a plain
+  // re-search on refresh only re-shuffles the same songs. Each feed section
+  // therefore rotates through result pages 1..3 on every refresh, always
+  // picking a page different from the one it showed last time, so every
+  // refresh shows genuinely new songs.
+  final math.Random _feedRandom = math.Random();
+  int _lastFeaturedPage = 0;
+  int _lastPopularPage = 0;
+  int _lastYourMusicPage = 0;
+  int _lastMixPage = 0;
+  int _lastSinglesPage = 0;
+  int _lastShufflePage = 0;
+
+  /// Picks a result page (1..3) different from [lastPage], so the next
+  /// refresh is guaranteed to show different songs than the previous one.
+  int _rotateFeedPage(int lastPage) {
+    final options = <int>[1, 2, 3]..remove(lastPage);
+    return options[_feedRandom.nextInt(options.length)];
+  }
+
+  /// IDs of online videos shown by the previous feed refresh / singles
+  /// load — the next refresh filters these out so re-ranked repeats
+  /// can't sneak back in (see [_dropPreviouslyShown]).
+  Set<String> _lastFeedOnlineIds = {};
+  Set<String> _lastSinglesIds = {};
+
+  /// Removes videos shown by the previous refresh from [pool], keeping at
+  /// least [minKeep] items (topped up with repeats if too few new ones).
+  /// YouTube re-ranks results between searches, so a few videos repeat
+  /// across pages — this is what makes every refresh visibly new.
+  List<OnlineSearchResult> _dropPreviouslyShown(
+    List<OnlineSearchResult> pool,
+    int minKeep,
+    Set<String> previousIds,
+  ) {
+    if (previousIds.isEmpty) return pool;
+    final unseen = pool.where((t) => !previousIds.contains(t.id)).toList();
+    if (unseen.length >= minKeep) return unseen;
+    final seen = pool.where((t) => previousIds.contains(t.id)).toList();
+    return [...unseen, ...seen.take(minKeep - unseen.length)];
+  }
+
+  /// Trending query variants for the Popular pool — a different pair is
+  /// picked on every refresh so the trending section varies even on page 1.
+  static const List<String> _trendingQueryVariants = [
+    'trending Pakistani and Indian hit songs latest',
+    'latest Bollywood Pakistani viral hit songs',
+    'new Pakistani songs 2026',
+    'viral desi songs this week',
+    'Punjabi new songs 2026 hits',
+    'Bollywood new songs 2026',
+  ];
+
   // ignore: unused_field
   final CollectionSort _collectionSort = CollectionSort.alphabetical;
   RecommendationBatch _recommendations = const RecommendationBatch();
@@ -788,56 +842,74 @@ class _HomeScreenState extends State<HomeScreen>
         discoveryCount: discoveryCount,
       );
 
+  /// Runs a feed search with timeout + error handling so one failed query
+  /// never breaks the whole feed refresh.
+  Future<List<OnlineSearchResult>> _safeFeedSearch(
+    Future<List<OnlineSearchResult>> future,
+    String label,
+  ) async {
+    try {
+      return await future.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => <OnlineSearchResult>[],
+      );
+    } catch (e) {
+      debugPrint('HomeScreen: $label search error: $e');
+      return <OnlineSearchResult>[];
+    }
+  }
+
   Future<void> _loadOnlineFeedPool() async {
     try {
       final preferred = UserPreferencesService.instance.getPreferredGenres();
+
+      // Each pool rotates to a different result page than last refresh,
+      // so the same queries return genuinely new songs every time.
+      final featuredPage = _rotateFeedPage(_lastFeaturedPage);
+      _lastFeaturedPage = featuredPage;
+      final popularPage = _rotateFeedPage(_lastPopularPage);
+      _lastPopularPage = popularPage;
+      final yourMusicPage = _rotateFeedPage(_lastYourMusicPage);
+      _lastYourMusicPage = yourMusicPage;
 
       // 1. Featured Pool: User's selected genres from onboarding / preferences
       final List<String> featuredGenres = preferred.isNotEmpty
           ? preferred
           : (await _selectFeedGenres(weightedCount: 3, discoveryCount: 1));
 
-      final List<OnlineSearchResult> featuredCombined = [];
-      for (final genre in featuredGenres.take(3)) {
-        try {
-          final results = await _youtubeService
-              .searchVideos(
+      // Queries run in parallel (searchVideosPage keeps no shared state),
+      // so rotating to deeper pages stays fast on refresh.
+      final featuredResults = await Future.wait(
+        featuredGenres.take(3).map((genre) => _safeFeedSearch(
+              _youtubeService.searchVideosPage(
                 '${YoutubeService.queryForGenre(genre)} featured hits',
+                page: featuredPage,
                 targetGenre: genre,
-              )
-              .timeout(const Duration(seconds: 8), onTimeout: () => []);
-          featuredCombined.addAll(results);
-        } catch (e) {
-          debugPrint('HomeScreen: Featured search error for "$genre": $e');
-        }
-      }
-      featuredCombined.shuffle();
+              ),
+              'Featured "$genre"',
+            )),
+      );
+      final List<OnlineSearchResult> featuredCombined =
+          featuredResults.expand((r) => r).toList()..shuffle();
 
-      // 2. Popular Songs Pool: Trending and latest Pakistani & Indian songs
-      final List<OnlineSearchResult> popularCombined = [];
-      try {
-        final trendingRes = await _youtubeService
-            .searchVideos(
-              'trending Pakistani and Indian hit songs latest',
-              targetGenre: 'Trending',
-            )
-            .timeout(const Duration(seconds: 8), onTimeout: () => []);
-        popularCombined.addAll(trendingRes);
+      // 2. Popular Songs Pool: two different trending queries each refresh
+      final trendingQueries = List<String>.from(_trendingQueryVariants)
+        ..shuffle(_feedRandom);
+      final popularResults = await Future.wait(
+        trendingQueries.take(2).map((query) => _safeFeedSearch(
+              _youtubeService.searchVideosPage(
+                query,
+                page: popularPage,
+                targetGenre: 'Trending',
+              ),
+              'Popular "$query"',
+            )),
+      );
+      final List<OnlineSearchResult> popularCombined =
+          popularResults.expand((r) => r).toList()..shuffle();
 
-        final latestRes = await _youtubeService
-            .searchVideos(
-              'latest Bollywood Pakistani viral hit songs',
-              targetGenre: 'Trending',
-            )
-            .timeout(const Duration(seconds: 8), onTimeout: () => []);
-        popularCombined.addAll(latestRes);
-      } catch (e) {
-        debugPrint('HomeScreen: Popular search error: $e');
-      }
-      popularCombined.shuffle();
-
-      // 3. Your Music Pool: Top searches across genres
-      final List<OnlineSearchResult> yourMusicCombined = [];
+      // 3. Your Music Pool: genres shuffled before picking, so different
+      // genres are queried on every refresh
       final Set<String> topGenres = {
         ...preferred,
         'Coke Studio',
@@ -847,35 +919,44 @@ class _HomeScreenState extends State<HomeScreen>
         'Punjabi',
         'Indie',
       };
-      for (final genre in topGenres.take(4)) {
-        try {
-          final results = await _youtubeService
-              .searchVideos(
+      final shuffledTopGenres = topGenres.toList()..shuffle(_feedRandom);
+      final yourMusicResults = await Future.wait(
+        shuffledTopGenres.take(4).map((genre) => _safeFeedSearch(
+              _youtubeService.searchVideosPage(
                 YoutubeService.queryForGenre(genre),
+                page: yourMusicPage,
                 targetGenre: genre,
-              )
-              .timeout(const Duration(seconds: 8), onTimeout: () => []);
-          yourMusicCombined.addAll(results);
-        } catch (e) {
-          debugPrint('HomeScreen: Your Music search error for "$genre": $e');
-        }
-      }
-      yourMusicCombined.shuffle();
+              ),
+              'Your Music "$genre"',
+            )),
+      );
+      final List<OnlineSearchResult> yourMusicCombined =
+          yourMusicResults.expand((r) => r).toList()..shuffle();
+
+      // Drop songs the previous refresh already showed, so every refresh
+      // is visibly new even when YouTube re-ranks and repeats a few videos.
+      final freshFeatured =
+          _dropPreviouslyShown(featuredCombined, 15, _lastFeedOnlineIds);
+      final freshPopular =
+          _dropPreviouslyShown(popularCombined, 15, _lastFeedOnlineIds);
+      final freshYourMusic =
+          _dropPreviouslyShown(yourMusicCombined, 20, _lastFeedOnlineIds);
 
       final fullPool = [
-        ...featuredCombined,
-        ...popularCombined,
-        ...yourMusicCombined,
+        ...freshFeatured,
+        ...freshPopular,
+        ...freshYourMusic,
       ];
       fullPool.shuffle();
 
       if (mounted) {
         setState(() {
-          _featuredOnlinePool = featuredCombined.take(30).toList();
-          _popularOnlinePool = popularCombined.take(30).toList();
-          _yourMusicOnlinePool = yourMusicCombined.take(40).toList();
+          _featuredOnlinePool = freshFeatured.take(30).toList();
+          _popularOnlinePool = freshPopular.take(30).toList();
+          _yourMusicOnlinePool = freshYourMusic.take(40).toList();
           _onlineFeedPool = fullPool.take(60).toList();
         });
+        _lastFeedOnlineIds = fullPool.map((t) => t.id).toSet();
       }
       try {
         final prefs = await SharedPreferences.getInstance();
@@ -1022,10 +1103,16 @@ class _HomeScreenState extends State<HomeScreen>
       );
       debugPrint('DEBUG: [HomeScreen] _loadMixes selected genres: $chosenGenres');
 
+      // Mixes rotate to a different result page than last refresh, so the
+      // same genre gives different songs instead of the same top 12.
+      final mixPage = _rotateFeedPage(_lastMixPage);
+      _lastMixPage = mixPage;
+
       final mixFutures = chosenGenres.map((genre) async {
         try {
           final results = await _youtubeService
-              .searchVideos(YoutubeService.queryForGenre(genre), targetGenre: genre)
+              .searchVideosPage(YoutubeService.queryForGenre(genre),
+                  page: mixPage, targetGenre: genre)
               .timeout(const Duration(seconds: 10), onTimeout: () => []);
 
           final filteredTracks = results.where((track) {
@@ -1096,6 +1183,20 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  /// The base query for the Singles list (Online tab). Shared by
+  /// [_loadSingles] and [_loadMoreSingles] so "load more" continues the
+  /// same search instead of a different one.
+  String _singlesQuery() {
+    final preferred = UserPreferencesService.instance.getPreferredGenres();
+    if (_selectedSinglesGenre == 'All') {
+      if (preferred.isNotEmpty) {
+        return '${preferred.take(3).join(" ")} hits songs';
+      }
+      return 'trending music hits songs';
+    }
+    return YoutubeService.queryForGenre(_selectedSinglesGenre);
+  }
+
   Future<void> _loadSingles({bool refresh = false}) async {
     if (!mounted) return;
     if (refresh) {
@@ -1113,28 +1214,24 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     try {
-      final preferred = UserPreferencesService.instance.getPreferredGenres();
-      final String query;
-      if (_selectedSinglesGenre == 'All') {
-        if (preferred.isNotEmpty) {
-          query = '${preferred.take(3).join(" ")} hits songs';
-        } else {
-          query = 'trending music hits songs';
-        }
-      } else {
-        query = YoutubeService.queryForGenre(_selectedSinglesGenre);
-      }
+      // Singles rotate to a different result page than last refresh, so
+      // the Online tab shows new songs instead of the same top results.
+      final page = _rotateFeedPage(_lastSinglesPage);
+      _lastSinglesPage = page;
 
       final results = await _youtubeService
-          .searchVideos(query, targetGenre: _selectedSinglesGenre)
+          .searchVideosPage(_singlesQuery(),
+              page: page, targetGenre: _selectedSinglesGenre)
           .timeout(const Duration(seconds: 9), onTimeout: () => []);
 
       if (mounted) {
+        final fresh = _dropPreviouslyShown(results, 8, _lastSinglesIds);
         setState(() {
-          _singles = results;
+          _singles = fresh;
           _isSinglesLoading = false;
-          _singlesPage = 1;
+          _singlesPage = page;
         });
+        _lastSinglesIds = fresh.map((t) => t.id).toSet();
       }
     } catch (e) {
       debugPrint('HomeScreen: Error loading singles: $e');
@@ -1155,14 +1252,14 @@ class _HomeScreenState extends State<HomeScreen>
     if (_isSinglesLoadingMore || _isSinglesLoading || _singles.isEmpty) return;
     setState(() => _isSinglesLoadingMore = true);
     try {
+      // Real pagination: fetch the next result page of the same query.
+      // (The old code appended "page N" to the query text, which YouTube
+      // mostly ignores, so it returned the same songs again.)
       final page = _singlesPage + 1;
-      final base = _selectedSinglesGenre == 'All'
-          ? 'trending hits songs'
-          : YoutubeService.queryForGenre(_selectedSinglesGenre);
-      final query = '$base page $page';
 
       final more = await _youtubeService
-          .searchVideos(query, targetGenre: _selectedSinglesGenre)
+          .searchVideosPage(_singlesQuery(),
+              page: page, targetGenre: _selectedSinglesGenre)
           .timeout(const Duration(seconds: 8), onTimeout: () => []);
 
       if (mounted) {
@@ -1199,8 +1296,11 @@ class _HomeScreenState extends State<HomeScreen>
         try {
           final genres = await _selectFeedGenres();
           final g = genres.isNotEmpty ? genres.first : 'trending';
+          final shufflePage = _rotateFeedPage(_lastShufflePage);
+          _lastShufflePage = shufflePage;
           final extra = await _youtubeService
-              .searchVideos(YoutubeService.queryForGenre(g), targetGenre: g)
+              .searchVideosPage(YoutubeService.queryForGenre(g),
+                  page: shufflePage, targetGenre: g)
               .timeout(const Duration(seconds: 6), onTimeout: () => []);
           for (final t in extra) {
             if (t.id.isNotEmpty) uniqueMap[t.id] = t;
